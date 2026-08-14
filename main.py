@@ -512,13 +512,36 @@ def fill_birthday(driver) -> str | None:
 # USERNAME: tạo random -> check API Roblox chưa dùng -> gõ TỪNG KÝ TỰ
 # ==========================================================================
 def random_username() -> str:
-    """Tạo username 7..11 ký tự, chỉ chữ (hoa/thường) và số, không ký tự đặc biệt."""
-    import string
-    length = random.randint(8, 11)              # 8..11 cho chắc chắn > 7
-    first = random.choice(string.ascii_letters)  # ký tự đầu là chữ
-    rest = "".join(random.choice(string.ascii_letters + string.digits)
-                   for _ in range(length - 1))
-    return first + rest
+    """Tạo username 7..11 ký tự, ĐỌC ĐƯỢC (không phải tên người).
+
+    Ghép các âm tiết phụ-âm + nguyên-âm phát âm được (vd 'Bako', 'Meli', 'Zuna')
+    rồi thêm số ở cuối. Chữ hoa/thường ngẫu nhiên -> giống người đặt, không phải
+    chuỗi ký tự loạn kiểu bot.
+    """
+    consonants = "bcdfghjklmnprstvwz"
+    vowels = "aeiou"
+
+    # Ghép 2-3 âm tiết (mỗi âm tiết = phụ âm + nguyên âm, thỉnh thoảng + phụ âm)
+    syllables = random.randint(2, 3)
+    name = ""
+    for _ in range(syllables):
+        name += random.choice(consonants) + random.choice(vowels)
+        if random.random() < 0.35:                      # đôi khi đóng bằng phụ âm
+            name += random.choice(consonants)
+
+    # Chữ hoa/thường ngẫu nhiên từng ký tự (nhưng đa số thường cho dễ đọc)
+    name = "".join(c.upper() if random.random() < 0.25 else c for c in name)
+
+    # Thêm 1-3 chữ số ở cuối
+    name += "".join(random.choice("0123456789")
+                    for _ in range(random.randint(1, 3)))
+
+    # Đảm bảo độ dài 7..11: nếu ngắn thì thêm âm tiết, dài thì cắt
+    while len(name) < 7:
+        name += random.choice(vowels) + random.choice("0123456789")
+    if len(name) > 11:
+        name = name[:11]
+    return name
 
 
 def username_available(driver, username: str, birthday: str) -> bool:
@@ -816,64 +839,55 @@ def save_account(username: str, password: str, cookie: str) -> None:
     print(f"[*] Đã lưu account vào {ACCOUNTS_FILE.name}: {username}:{password}:<cookie {len(cookie)} ký tự>")
 
 
-def wait_login_and_save(driver, username: str, password: str,
-                        max_wait: int = 600) -> str:
-    """Chờ đăng nhập xong rồi lưu account. Trả về kết quả dạng chuỗi:
-
-    - "SAVED"     : lấy được cookie, đã lưu account.txt
-    - "MULTIWAVE" : captcha > 1 wave -> BỎ, tắt browser bật cái khác
-    - "FAIL"      : hết giờ / cửa sổ đóng, chưa lưu được
+def has_unknown_error(driver) -> bool:
+    """Roblox báo 'Sorry! An unknown error occurred' (id=GeneralErrorText)?"""
+    js = r"""
+    const el = document.querySelector('#GeneralErrorText, [id*="GeneralError" i]');
+    if (el && el.offsetParent !== null) return true;
+    // dò theo nội dung text phòng khi id đổi
+    return /unknown error occurred/i.test(document.body ? document.body.innerText : '');
     """
-    print("[*] Đang chờ đăng nhập / kiểm tra captcha...")
+    try:
+        return bool(driver.execute_script(js))
+    except Exception:
+        return False
+
+
+def wait_login_and_save(driver, username: str, password: str,
+                        max_wait: int = 40) -> str:
+    """Sau khi Sign Up: chờ ngắn xem có cookie ngay không. Trả về:
+
+    - "SAVED"   : có cookie -> lưu account.txt (tạo acc thành công, KHÔNG captcha)
+    - "CAPTCHA" : hiện captcha -> BỎ luôn, tắt tab bật cái khác
+    - "ERROR"   : Roblox báo 'unknown error' -> BỎ luôn, tắt tab bật cái khác
+    - "FAIL"    : lỗi/hết giờ mà không có cookie -> bỏ
+    """
+    print("[*] Đang chờ kết quả Sign Up...")
     start = time.time()
-
-    # --- Bước 1: chờ vài giây xem có cookie ngay (KHÔNG captcha) ---
-    for _ in range(4):
-        cookie = get_roblosecurity(driver)
-        if cookie:
-            print("[*] KHÔNG captcha -> đã đăng nhập, lấy cookie.")
-            save_account(username, password, cookie)
-            return "SAVED"
-        if captcha_present(driver):
-            break
-        time.sleep(1)
-
-    # --- Bước 2: nếu có captcha -> chờ load xong rồi CLICK vào để hiện wave ---
-    if captcha_present(driver):
-        print("[!!!] CÓ CAPTCHA — chờ load rồi click vào để đọc số wave...")
-        time.sleep(3)                       # chờ Arkose render
-        click_into_captcha(driver)          # click vào captcha để nó bắt đầu
-        time.sleep(2.5)                     # chờ wave hiện ra
-
-        # Đọc số wave (thử vài lần vì load bất đồng bộ)
-        wave = 0
-        for _ in range(6):
-            w = detect_captcha_wave(driver)
-            if w:
-                wave = w
-                break
-            time.sleep(1)
-
-        if wave and wave > 1:
-            print(f"[!!!] CAPTCHA {wave} WAVE (>1) -> BỎ, tắt browser bật cái khác.")
-            return "MULTIWAVE"
-        print(f"[!!!] CAPTCHA {wave or 1} wave -> chấp nhận. HÃY GIẢI BẰNG TAY, "
-              f"chương trình sẽ tự lấy cookie khi xong.")
-
-    # --- Bước 3: chờ tới khi có cookie (người giải captcha xong) ---
     while time.time() - start < max_wait:
+        # Có cookie = tạo acc thành công luôn (không captcha)
         cookie = get_roblosecurity(driver)
         if cookie:
-            print("[*] ĐÃ ĐĂNG NHẬP! Lấy được cookie.")
+            print("[*] TẠO ACC THÀNH CÔNG (không captcha) -> lưu cookie.")
             save_account(username, password, cookie)
             return "SAVED"
+
+        # Roblox báo unknown error -> bỏ ngay
+        if has_unknown_error(driver):
+            print("[!] UNKNOWN ERROR (Roblox chặn) -> bỏ tab này, bật cái khác.")
+            return "ERROR"
+
+        # Thấy captcha -> bỏ ngay, không giải
+        if captcha_present(driver):
+            print("[!] CÓ CAPTCHA -> bỏ tab này, bật cái khác.")
+            return "CAPTCHA"
+
         try:
             _ = driver.title
         except Exception:
             return "FAIL"
-        time.sleep(3)
+        time.sleep(1.5)
 
-    print("[!] Hết thời gian chờ.")
     return "FAIL"
 
 
@@ -910,22 +924,13 @@ def fill_one_account(driver, name: str, slot: int) -> None:
             print(f"{tag} [!] Thiếu username/password.")
 
         if result == "SAVED":
-            print(f"{tag} [*] Đã lưu account -> đóng + xóa profile.")
-        elif result == "MULTIWAVE":
-            print(f"{tag} [*] Captcha >1 wave -> tắt luôn, worker bật acc khác.")
-        else:  # FAIL: captcha 1 wave chờ giải tay, hoặc lỗi
-            # Giữ mở tối đa để bạn giải captcha 1 wave; đóng tay để bỏ qua
-            print(f"{tag} [!] Chờ bạn giải captcha (1 wave) hoặc đóng tay để bỏ.")
-            while True:
-                try:
-                    if get_roblosecurity(driver):
-                        # bạn vừa giải xong -> lưu
-                        wait_login_and_save(driver, username, password, max_wait=10)
-                        break
-                    _ = driver.title
-                    time.sleep(2)
-                except Exception:
-                    break
+            print(f"{tag} [*] Thành công -> đóng + xóa profile.")
+        elif result == "CAPTCHA":
+            print(f"{tag} [*] Dính captcha -> tắt tab, worker bật acc khác.")
+        elif result == "ERROR":
+            print(f"{tag} [*] Roblox báo unknown error -> tắt tab, bật acc khác.")
+        else:
+            print(f"{tag} [!] Không thành công -> bỏ, làm acc khác.")
     except Exception as exc:
         print(f"{tag} [!] Lỗi: {exc}")
     finally:
